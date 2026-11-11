@@ -1,0 +1,22 @@
+{
+  "name": "minimi-chat-agent",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "A chat agent with one tool: web search. Timestamped memory, deterministic date recall, freshness re-check.",
+  "engines": {
+    "node": ">=20.12"
+  },
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "start": "tsx src/server.ts",
+    "test": "node --import tsx --test test/*.test.ts",
+    "typecheck": "tsc --noEmit",
+    "bench": "tsx evals/run.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.1",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}
