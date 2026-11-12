@@ -61,7 +61,9 @@ async function precheck(
   recalled: { queries: string[] }[],
   signal: AbortSignal,
 ): Promise<{ query: string; sources: Source[] }[]> {
-  const queries = [...new Set(recalled.flatMap((turn) => turn.queries))].slice(-2);
+  // Re-run what the answer the user is pointing at was built from — not every
+  // query from every recalled turn.
+  const queries = (recalled.at(-1)?.queries ?? recalled.flatMap((turn) => turn.queries)).slice(-2);
   if (!queries.length) return [];
   return Promise.all(
     queries.map(async (query) => ({
@@ -127,7 +129,10 @@ export async function* runTurn(
   const unseen = recalled.filter((turn) => !historyIds.has(turn.id));
   if (unseen.length) rules.push(buildMemoryBlock(unseen, today));
 
-  if (freshnessSensitive && recalled.some((turn) => turn.queries.length)) {
+  // A re-check only makes sense when the message points back at an earlier
+  // answer. "What did I ask you this morning" is freshness-sensitive by
+  // vocabulary but wants the log, not a search.
+  if (freshnessSensitive && looksReferential(text) && recalled.some((turn) => turn.queries.length)) {
     const fresh = await precheck(search, recalled, signal);
     if (fresh.length) {
       for (const batch of fresh) {
