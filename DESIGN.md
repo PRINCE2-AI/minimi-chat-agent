@@ -13,7 +13,7 @@ browser ──POST /api/chat──▶ server ──▶ agent.ts
                      └──────────────────┼───────────────────┘
                                         ▼
                               one streamed model call
-                              └── tool loop ≤ 3 rounds ──▶ web_search
+                              └── tools: 2 rounds, then 1 clean answer ──▶ web_search
                                         ▼
                          tokens → SSE → browser ; sources attached
                                         ▼
@@ -51,12 +51,13 @@ at this scale it would add a dependency, an embedding cost, and worse precision 
 Every turn stores the exact `queries` it ran and the `sources` it was grounded in.
 
 When a new message is freshness-sensitive (`price`, `pricing`, `changed`, `still`,
-`latest`, `version`, `shipped`, …) **and** recall returned a turn with stored queries,
-the harness re-runs those same queries before the first model call, then injects:
+`latest`, `version`, `shipped`, …) **and** the context it points at is a turn with
+stored queries, the harness re-runs those same queries before the first model call,
+then injects:
 
-- the fresh results as normal `web_search` tool messages, and
-- a `FRESHNESS CHECK` block: query list, source counts, which URLs are new, which are
-  gone, which were kept.
+- the fresh search results as plain text, in the same message as the rules, and
+- a `FRESHNESS CHECK` block: the answer from then, the query list, source counts,
+  which URLs are new, which are gone, which were kept.
 
 The model is told not to claim "nothing changed" from URL identity alone, because
 snippets change without the URL changing. The prompt fixes the answer shape: what was
@@ -64,23 +65,41 @@ true then and when → what is true now → the difference.
 
 **Why before the model, not after:** a "nudge the model to re-check" loop lets it start
 streaming a stale answer, then corrects it — the user reads the wrong sentence first.
-The pre-step costs ~0.3–0.8 s only on the turns that need it, and every token that
-reaches the browser is grounded in a fresh search.
+The pre-step costs ~0.3–0.8 s per query only on the turns that need it, and every token
+that reaches the browser is grounded in a fresh search.
+
+"Has any of them changed since?" often shares no keyword with the turn it points at, so
+when nothing recall-able matches and the message is still referential (`it`, `them`,
+`that`, `still`, `since`), the harness falls back to the most recent turn with stored
+queries from the last 30 days. A follow-up does not need to name the thing again.
 
 ## 3. One streamed call, no framework
 
-The whole agent loop is ~90 lines in `src/agent.ts`: stream a completion, collect tool
-calls, run them in parallel, append results, repeat (max 3 rounds). The client is a
-plain `fetch` + SSE parser in `src/llm.ts` — no SDK.
+The whole agent loop is under 100 lines in `src/agent.ts`: stream a completion, collect
+the tool call, run it, append the result, repeat at most twice, then one final pass with
+the tool removed so the turn always ends in prose. The client is a plain `fetch` + SSE
+parser in `src/llm.ts` — no SDK.
+
+Three provider quirks shaped that loop, and each is a line of code rather than a
+framework:
+
+- Gemini signs every function call with a `thought_signature` and rejects the next
+  request if it is not echoed back, so tool calls are stored and replayed verbatim.
+- The same endpoint answers `400` to parallel function calls in a stream, so
+  `parallel_tool_calls` is off and each round is one search.
+- It also ignores `tool_choice: "none"`, so the last pass is a fresh request with no
+  tool declared and the collected results as context. Only one system message is sent
+  per request: a second one silently replaced the rules instead of adding to them.
 
 No LangChain/LangGraph. For one tool and three rounds it would add a dependency, hide
 prompt rewrites, and make the freshness pre-step awkward to express. Everything here is
 readable in one sitting, which is also the point of the challenge.
 
-Latency choices: one model call instead of plan-then-act, parallel tool execution,
-10-minute in-process search cache keyed by `query + recency`, five results max, and
-sources deduped by normalized URL (trailing slash and hash ignored). The UI renders
-`[1]`-style citations from actual tool output, so a citation cannot be hallucinated.
+Latency choices: one model call instead of plan-then-act, a 10-minute in-process search
+cache keyed by `query + recency`, five results max, sources deduped by normalized URL
+(trailing slash and hash ignored), a 60 s cap per model request, and one retry on the
+provider's `503 high demand`. The UI renders `[1]`-style citations from actual tool
+output, so a citation cannot be hallucinated.
 
 ## What I considered and rejected
 

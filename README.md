@@ -25,9 +25,10 @@ and points back at an earlier turn, the harness re-runs those same queries *befo
 model speaks*, computes a source diff, and hands the model the comparison. The answer
 comes out as: what was true then → what is true now → the delta.
 
-**Answers stream.** One model call, streamed over SSE. Tool calls loop at most three
-rounds. Sources are attached by the harness from real tool results, so citations cannot
-be invented.
+**Answers stream.** One model call at a time, streamed over SSE. Tool use is capped at
+two searches per turn, then a final pass with no tool so the turn always ends in prose.
+Sources are attached by the harness from real tool results, so citations cannot be
+invented.
 
 Read [DESIGN.md](DESIGN.md) for the reasoning and the rejected alternatives.
 

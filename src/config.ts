@@ -2,6 +2,7 @@ export interface LlmConfig {
   baseUrl: string;
   apiKey: string;
   model: string;
+  reasoningEffort?: string;
 }
 
 export interface SearchConfig {
@@ -23,6 +24,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
       baseUrl: (env.LLM_BASE_URL?.trim() || "https://api.openai.com/v1").replace(/\/+$/, ""),
       apiKey: env.LLM_API_KEY?.trim() ?? "",
       model: env.LLM_MODEL?.trim() || "gpt-4o-mini",
+      reasoningEffort: env.LLM_REASONING_EFFORT?.trim() || undefined,
     },
     search: {
       tavilyKey: env.TAVILY_API_KEY?.trim() || undefined,

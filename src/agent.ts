@@ -95,9 +95,9 @@ export async function* runTurn(
   // "Has any of them changed?" often shares no keywords with the turn it refers
   // to. If the user is clearly pointing back and nothing matched, fall back to
   // the most recent turn we can actually re-check.
-  if (!ranges.length && !recalled.length && freshnessSensitive && looksReferential(text)) {
+  if (!recalled.length && freshnessSensitive && looksReferential(text)) {
     const withSources = (await memory.turns(sessionId))
-      .filter((turn) => turn.queries.length && turn.day >= addDays(today, -7))
+      .filter((turn) => turn.queries.length && turn.day >= addDays(today, -30))
       .at(-1);
     if (withSources) recalled = [withSources];
   }
@@ -111,47 +111,52 @@ export async function* runTurn(
 
   const queries: string[] = [];
   const sources: Source[] = [];
-  const messages: ChatMessage[] = [{ role: "system", content: buildSystemPrompt(now, today, cfg.tz) }];
+  // Everything instructional goes into a single system message: providers that
+  // map system -> systemInstruction keep only one, and a second block silently
+  // replaces the rules.
+  const rules: string[] = [buildSystemPrompt(now, today, cfg.tz)];
+  const dialogue: ChatMessage[] = [];
 
   for (const turn of history) {
-    messages.push({ role: "user", content: turn.user });
-    messages.push({ role: "assistant", content: turn.assistant });
+    // Dates ride along with the transcript: without them the model cannot answer
+    // "what did I ask on 3 November" about a turn it can plainly see.
+    dialogue.push({ role: "user", content: `[${turn.day}] ${turn.user}` });
+    dialogue.push({ role: "assistant", content: turn.assistant });
   }
 
   const unseen = recalled.filter((turn) => !historyIds.has(turn.id));
-  if (unseen.length) messages.push({ role: "system", content: buildMemoryBlock(unseen, today) });
+  if (unseen.length) rules.push(buildMemoryBlock(unseen, today));
 
   if (freshnessSensitive && recalled.some((turn) => turn.queries.length)) {
     const fresh = await precheck(search, recalled, signal);
     if (fresh.length) {
-      const calls: ToolCall[] = fresh.map((batch, index) => ({
-        id: `precheck_${index}`,
-        type: "function",
-        function: { name: "web_search", arguments: JSON.stringify({ query: batch.query }) },
-      }));
-      messages.push({ role: "assistant", content: null, tool_calls: calls });
-      for (const [index, batch] of fresh.entries()) {
+      for (const batch of fresh) {
         queries.push(batch.query);
         sources.push(...batch.sources);
-        messages.push({
-          role: "tool",
-          tool_call_id: `precheck_${index}`,
-          name: "web_search",
-          content: formatResults(batch.query, batch.sources),
-        });
         yield { type: "tool", query: batch.query, results: batch.sources.length, recheck: true };
       }
-      messages.push({
-        role: "system",
-        content: buildFreshnessBlock(recalled, dedupeSources(fresh.flatMap((b) => b.sources)), fresh.map((b) => b.query)),
-      });
+      // Delivered as context, not as fabricated tool messages: tool-call turns
+      // are provider-specific (Gemini signs them) and inventing one would be
+      // rejected on the next request.
+      const results = fresh.map((batch) => formatResults(batch.query, batch.sources)).join("\n\n");
+      rules.push(
+        `${buildFreshnessBlock(recalled, dedupeSources(fresh.flatMap((b) => b.sources)), fresh.map((b) => b.query))}\n\n${results}`,
+      );
     }
   }
 
-  messages.push({ role: "user", content: text });
+  const build = (extra?: string): ChatMessage[] => [
+    { role: "system", content: [...rules, ...(extra ? [extra] : [])].join("\n\n") },
+    ...dialogue,
+    { role: "user", content: text },
+  ];
+
+  const messages = build();
 
   let answer = "";
-  for (let round = 0; round < 3; round += 1) {
+  const found: string[] = [];
+  const MAX_TOOL_ROUNDS = 2;
+  for (let round = 0; round < MAX_TOOL_ROUNDS; round += 1) {
     let content = "";
     let calls: ToolCall[] = [];
     for await (const event of streamChat(cfg.llm, messages, [SEARCH_TOOL], signal)) {
@@ -171,23 +176,43 @@ export async function* runTurn(
       calls.map(async (call) => {
         const { query, recency } = parseArgs(call.function.arguments);
         if (!query) return { call, query: "", found: [] as Source[] };
-        const found = await search.search(query, { recency, signal }).catch(() => [] as Source[]);
-        return { call, query, found };
+        const results = await search.search(query, { recency, signal }).catch(() => [] as Source[]);
+        return { call, query, found: results };
       }),
     );
 
     for (const execution of executions) {
+      const body = execution.query
+        ? formatResults(execution.query, execution.found)
+        : "Error: query was missing.";
       if (execution.query) {
         queries.push(execution.query);
         sources.push(...execution.found);
+        found.push(body);
         yield { type: "tool", query: execution.query, results: execution.found.length };
       }
       messages.push({
         role: "tool",
         tool_call_id: execution.call.id,
         name: "web_search",
-        content: execution.query ? formatResults(execution.query, execution.found) : "Error: query was missing.",
+        content: body,
       });
+    }
+  }
+
+  // Some providers ignore tool_choice:"none" and keep calling the tool, so the
+  // last pass re-asks with no tool declared and the results as plain context.
+  if (!answer.trim() && found.length) {
+    for await (const event of streamChat(
+      cfg.llm,
+      build(`SEARCH RESULTS gathered this turn — answer from these, do not search again:\n\n${found.join("\n\n")}`),
+      [],
+      signal,
+    )) {
+      if (event.type === "token") {
+        answer += event.text;
+        yield { type: "token", text: event.text };
+      }
     }
   }
 
